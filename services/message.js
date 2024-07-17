@@ -2,11 +2,9 @@ import {
   getTenantAccessToken,
   getFeishuMessages,
   sendFeishuMessage,
+  sendFeishuMessageStream,
 } from "../api/feishu.js";
-import { getGptCompletion } from "../api/openai.js";
-
-const MAX_RECURSIVE_CALLS = 10;
-const MAX_MESSAGE_LENGTH = 1000;
+import { getGptCompletion, getGptCompletionStream } from "../api/openai.js";
 
 function buildGptPrompt(messages, botSenderID) {
   return messages
@@ -44,31 +42,31 @@ async function handleMessage(env, tenantAccessToken, parsedDecrypted) {
     }
 
     const messages = await getFeishuMessages(env, tenantAccessToken, messageId);
-    const gptPrompt = buildGptPrompt([...messages], env.BotSenderID); // Use spread operator to copy array
+    const gptPrompt = buildGptPrompt([...messages], env.BotSenderID);
 
-    const chatGptResponse = await getGptCompletion(env, gptPrompt);
-    await sendFeishuMessage(
+    const chatGptResponseStream = await getGptCompletionStream(env, gptPrompt);
+    await sendFeishuMessageStream(
       env,
       tenantAccessToken,
       chatId,
-      chatGptResponse,
+      "",
+      chatGptResponseStream,
       "chat_id",
-      messageId,
-      eventId
+      messageId
     );
   } else if (!isGroupChat) {
     const messages = await getFeishuMessages(env, tenantAccessToken, messageId);
-    const gptPrompt = buildGptPrompt([...messages], env.BotSenderID); // Use spread operator to copy array
+    const gptPrompt = buildGptPrompt([...messages], env.BotSenderID);
 
-    const chatGptResponse = await getGptCompletion(env, gptPrompt);
-    await sendFeishuMessage(
+    const chatGptResponseStream = await getGptCompletionStream(env, gptPrompt);
+    await sendFeishuMessageStream(
       env,
       tenantAccessToken,
       chatId,
-      chatGptResponse,
+      "",
+      chatGptResponseStream,
       "chat_id",
-      messageId,
-      eventId
+      messageId
     );
   }
   return new Response("ChatGPT response sent successfully", { status: 200 });
