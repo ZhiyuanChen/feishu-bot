@@ -1,11 +1,6 @@
 import { AESCipher } from "./utils/aesCipher.js";
-import {
-  handleDocumentCreation,
-  handleUrlVerification,
-  handleEvent,
-} from "./services/event.js";
-import { handleMessage } from "./services/message.js";
-import { getTenantAccessToken, sendFeishuMessage } from "./api/feishu.js";
+import { handleUrlVerification, handleEvent } from "./services/event.js";
+import { sendFeishuMessage } from "./api/feishu.js";
 
 export default {
   async fetch(request, env, ctx) {
@@ -57,11 +52,7 @@ async function handleWebhookCallback(request, env) {
   const chatId = data.chat_id;
   const result = data.result;
 
-  const tenantAccessToken = await getTenantAccessToken(
-    env.AppID,
-    env.AppSecret
-  );
-  await sendFeishuMessage(env, tenantAccessToken, chatId, result);
+  await sendFeishuMessage(env, chatId, result);
 
   return new Response("Result sent successfully", { status: 200 });
 }

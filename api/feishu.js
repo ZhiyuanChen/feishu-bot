@@ -2,194 +2,236 @@ const STREAMING_STATUS_TEXT = "鸭鸭努力工作中...嘎...嘎...";
 const MAX_RECURSIVE_CALLS = 10;
 const MAX_MESSAGE_LENGTH = 1000;
 
-async function getTenantAccessToken(appId, appSecret) {
-  const response = await fetch(
-    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-    {
-      method: "POST",
+let tokenCache = {
+  tenant_access_token: null,
+  expire: 0,
+  timestamp: 0,
+};
+
+// Helper function to handle HTTP requests
+async function sendFeishuRequest(url, method, token, body = null) {
+  try {
+    const options = {
+      method: method,
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+    };
+
+    if (token) {
+      options.headers.Authorization = `Bearer ${token}`;
     }
-  );
 
-  if (!response.ok) {
-    throw new Error("Failed to get tenant_access_token");
+    if (body) {
+      options.body = JSON.stringify(body);
+    }
+
+    const response = await fetch(url, options);
+
+    if (!response.ok) {
+      const errorDetails = await response.text();
+      throw new Error(`Failed to ${method} Feishu message: ${errorDetails}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error(`Error in sendFeishuRequest: ${error.message}`);
+    throw error;
   }
-
-  const data = await response.json();
-  return data.tenant_access_token;
 }
 
+// Get Tenant Access Token
+async function getTenantAccessToken(env, appId, appSecret) {
+  const currentTime = Math.floor(Date.now() / 1000);
+
+  if (tokenCache.tenant_access_token && tokenCache.expire - currentTime > 200) {
+    return tokenCache.tenant_access_token;
+  }
+
+  const url =
+    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal";
+  const body = {
+    app_id: appId || env.AppID,
+    app_secret: appSecret || env.AppSecret,
+  };
+
+  const response = await sendFeishuRequest(url, "POST", null, body);
+  tokenCache.tenant_access_token = response.tenant_access_token;
+  tokenCache.expire = currentTime + response.expire; // Assuming 'expire' field contains the time-to-live in seconds
+  tokenCache.timestamp = currentTime;
+
+  return tokenCache.tenant_access_token;
+}
+
+// Get Feishu Message
+async function getFeishuMessage(env, messageId) {
+  const tenantAccessToken = await getTenantAccessToken(env);
+  const url = `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}`;
+  const response = await sendFeishuRequest(url, "GET", tenantAccessToken);
+
+  const messageData = response.data.items[0];
+  const contentData = JSON.parse(messageData.body.content);
+  let content;
+
+  if (contentData.text) {
+    content = contentData.text;
+  } else if (contentData.title || contentData.elements) {
+    content =
+      contentData.title ||
+      contentData.elements
+        .map((elementArray) =>
+          elementArray.map((element) => element.text || "").join("\n")
+        )
+        .join("\n");
+  } else {
+    console.error("Unknown message content format:", contentData);
+    content = messageData.body.content;
+  }
+
+  return {
+    content: content,
+    parent_id: messageData.parent_id,
+    sender_id: messageData.sender.id,
+  };
+}
+
+// Recursively get Feishu Messages
+async function getFeishuMessages(env, messageId, messages = [], callCount = 0) {
+  try {
+    if (callCount >= MAX_RECURSIVE_CALLS) return messages;
+
+    const messageContent = await getFeishuMessage(env, messageId);
+    messages.push(messageContent);
+
+    const totalLength = messages.reduce(
+      (sum, msg) => sum + msg.content.length,
+      0
+    );
+
+    if (messageContent.parent_id && totalLength < MAX_MESSAGE_LENGTH) {
+      return await getFeishuMessages(
+        env,
+        messageContent.parent_id,
+        messages,
+        callCount + 1
+      );
+    }
+
+    return messages;
+  } catch (error) {
+    console.error(
+      `Error in getFeishuMessages at callCount ${callCount}: ${error.message}`
+    );
+    throw error;
+  }
+}
+
+// Send Feishu Message
 async function sendFeishuMessage(
   env,
-  tenantAccessToken,
   receiveId,
   messageContent,
   receiveIdType = "chat_id",
   replyTo = null,
   uuid = ""
 ) {
-  console.log(`Sending message to ${receiveId} with: ${messageContent}`);
+  const tenantAccessToken = await getTenantAccessToken(env);
   const searchParams = new URLSearchParams({ receive_id_type: receiveIdType });
-
   const body = {
     receive_id: receiveId,
     msg_type: "text",
     content: JSON.stringify({ text: messageContent }),
+    uuid,
   };
 
-  if (uuid) {
-    body.uuid = uuid;
-  }
-
   let url = `https://open.feishu.cn/open-apis/im/v1/messages?${searchParams}`;
-  if (replyTo) {
+  if (replyTo)
     url = `https://open.feishu.cn/open-apis/im/v1/messages/${replyTo}/reply`;
-  }
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${tenantAccessToken}`,
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      replyTo
-        ? "Failed to reply Feishu message"
-        : "Failed to send Feishu message"
-    );
-  }
-
-  return response.json();
+  return await sendFeishuRequest(url, "POST", tenantAccessToken, body);
 }
 
+// Construct Message Content
+function constructMessageContent(content, isFinal = false) {
+  const elements = [{ tag: "div", text: { content: content, tag: "lark_md" } }];
+
+  if (!isFinal) {
+    elements.push({
+      tag: "div",
+      text: {
+        content: STREAMING_STATUS_TEXT,
+        tag: "plain_text",
+        text_size: "notation",
+        text_color: "gray",
+        text_align: "right",
+      },
+    });
+  }
+
+  return {
+    content: JSON.stringify({
+      config: { wide_screen_mode: true },
+      elements: elements,
+    }),
+    msg_type: "interactive",
+  };
+}
+
+// Patch Feishu Message
+async function patchFeishuMessage(env, messageId, content, isFinal = false) {
+  const tenantAccessToken = await getTenantAccessToken(env);
+  const body = constructMessageContent(content, isFinal);
+  const url = `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}`;
+
+  return await sendFeishuRequest(url, "PATCH", tenantAccessToken, body);
+}
+
+// Send Feishu Message Stream
 async function sendFeishuMessageStream(
   env,
-  tenantAccessToken,
   receiveId,
   initialContent,
   stream,
   receiveIdType = "chat_id",
   replyTo = null
 ) {
-  console.log(`Sending streaming message to ${receiveId}`);
+  const tenantAccessToken = await getTenantAccessToken(env);
   const searchParams = new URLSearchParams({ receive_id_type: receiveIdType });
-
-  const initialBody = {
-    receive_id: receiveId,
-    msg_type: "interactive",
-    content: JSON.stringify({
-      config: {
-        wide_screen_mode: true,
-      },
-      elements: [
-        {
-          tag: "div",
-          text: {
-            content: initialContent,
-            tag: "lark_md",
-          },
-        },
-        {
-          tag: "div",
-          text: {
-            content: `${STREAMING_STATUS_TEXT}`,
-            tag: "plain_text",
-            text_size: "notation",
-            text_color: "gray",
-            text_align: "right",
-          },
-        },
-      ],
-    }),
-  };
-
+  const initialBody = constructMessageContent(initialContent);
   let url = `https://open.feishu.cn/open-apis/im/v1/messages?${searchParams}`;
-  if (replyTo) {
+  if (replyTo)
     url = `https://open.feishu.cn/open-apis/im/v1/messages/${replyTo}/reply`;
-  }
 
-  const initialResponse = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${tenantAccessToken}`,
-    },
-    body: JSON.stringify(initialBody),
-  });
-
-  if (!initialResponse.ok) {
-    throw new Error("Failed to send initial Feishu message for streaming");
-  }
-
-  const initialMessageData = await initialResponse.json();
-  const messageId = initialMessageData.data.message_id;
+  const initialResponse = await sendFeishuRequest(
+    url,
+    "POST",
+    tenantAccessToken,
+    initialBody
+  );
+  const messageId = initialResponse.data.message_id;
 
   const reader = stream.getReader();
   let messageContent = initialContent;
-  let readResult;
   let buffer = "";
 
   try {
-    while (!(readResult = await reader.read()).done) {
-      const chunk = new TextDecoder("utf-8").decode(readResult.value);
-      buffer += chunk;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-      let lines = buffer.split("\n\n\n");
+      const chunk = new TextDecoder("utf-8").decode(value);
+      buffer += chunk;
+      const lines = buffer.split("\n\n\n");
       buffer = lines.pop(); // Keep the last incomplete chunk in the buffer
 
       for (let line of lines) {
         if (!line.startsWith("data:")) {
-          throw new Error(`error message ${line}`);
+          throw new Error(`Unexpected data format: ${line}`);
         }
 
-        let decoded = line.slice(5).trim();
+        const decoded = line.slice(5).trim();
         if (decoded === "[DONE]") {
-          console.log("finish!");
-
-          // Final update without STREAMING_STATUS_TEXT
-          const finalBody = {
-            content: JSON.stringify({
-              config: {
-                wide_screen_mode: true,
-              },
-              elements: [
-                {
-                  tag: "div",
-                  text: {
-                    content: messageContent,
-                    tag: "lark_md",
-                  },
-                },
-              ],
-            }),
-            msg_type: "interactive",
-          };
-
-          const finalResponse = await fetch(
-            `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}`,
-            {
-              method: "PATCH",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${tenantAccessToken}`,
-              },
-              body: JSON.stringify(finalBody),
-            }
-          );
-
-          if (!finalResponse.ok) {
-            throw new Error(
-              "Failed to send final Feishu message for streaming"
-            );
-          }
-
+          await patchFeishuMessage(env, messageId, messageContent, true);
           return;
         }
 
@@ -197,164 +239,30 @@ async function sendFeishuMessageStream(
         try {
           output = JSON.parse(decoded);
         } catch (error) {
-          console.error("Failed to parse JSON:", decoded);
+          console.error(`Failed to parse JSON: ${decoded}`);
           continue;
         }
 
-        if (output["object"] === "error") {
-          throw new Error(`logic error: ${output}`);
+        if (output.object === "error") {
+          throw new Error(`Logic error: ${output}`);
         }
 
-        messageContent += output["choices"][0]["delta"]["content"];
-
-        const updateBody = {
-          content: JSON.stringify({
-            config: {
-              wide_screen_mode: true,
-            },
-            elements: [
-              {
-                tag: "div",
-                text: {
-                  content: initialContent,
-                  tag: "lark_md",
-                },
-              },
-              {
-                tag: "div",
-                text: {
-                  content: `\n\n${STREAMING_STATUS_TEXT}`,
-                  tag: "plain_text",
-                  text_size: "notation",
-                  text_color: "gray",
-                  text_align: "right",
-                },
-              },
-            ],
-          }),
-          msg_type: "interactive",
-        };
-
-        const updateResponse = await fetch(
-          `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}`,
-          {
-            method: "PATCH",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${tenantAccessToken}`,
-            },
-            body: JSON.stringify(updateBody),
-          }
-        );
-
-        if (!updateResponse.ok) {
-          throw new Error("Failed to update Feishu message for streaming");
-        }
+        messageContent += output.choices[0].delta.content;
+        await patchFeishuMessage(env, messageId, messageContent);
       }
     }
+  } catch (error) {
+    console.error("Error in sendFeishuMessageStream:", error);
   } finally {
-    const finalBody = {
-      content: JSON.stringify({
-        config: {
-          wide_screen_mode: true,
-        },
-        elements: [
-          {
-            tag: "div",
-            text: {
-              content: messageContent,
-              tag: "lark_md",
-            },
-          },
-        ],
-      }),
-      msg_type: "interactive",
-    };
-
-    const finalResponse = await fetch(
-      `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}`,
-      {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${tenantAccessToken}`,
-        },
-        body: JSON.stringify(finalBody),
-      }
-    );
-
-    if (!finalResponse.ok) {
-      throw new Error("Failed to send final Feishu message for streaming");
-    }
+    // Ensure STREAMING_STATUS_TEXT is removed regardless of success or failure
+    await patchFeishuMessage(env, messageId, messageContent, true);
   }
-}
-
-async function getFeishuMessage(env, tenantAccessToken, messageId) {
-  const response = await fetch(
-    `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}`,
-    {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${tenantAccessToken}`,
-      },
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error(
-      `Failed to get Feishu message content for message ID: ${messageId}`
-    );
-  }
-
-  const messageData = await response.json();
-  return {
-    content: JSON.parse(messageData.data.items[0].body.content).text,
-    parent_id: messageData.data.items[0].parent_id,
-    sender_id: messageData.data.items[0].sender.id,
-  };
-}
-
-async function getFeishuMessages(
-  env,
-  tenantAccessToken,
-  messageId,
-  messages = [],
-  callCount = 0
-) {
-  if (callCount >= MAX_RECURSIVE_CALLS) {
-    return messages;
-  }
-
-  const messageContent = await getFeishuMessage(
-    env,
-    tenantAccessToken,
-    messageId
-  );
-  messages.push(messageContent);
-
-  if (
-    messageContent.parent_id &&
-    messageContent.content.length +
-      messages.reduce((sum, msg) => sum + msg.content.length, 0) <
-      MAX_MESSAGE_LENGTH
-  ) {
-    return getFeishuMessages(
-      env,
-      tenantAccessToken,
-      messageContent.parent_id,
-      messages,
-      callCount + 1
-    );
-  }
-
-  return messages;
 }
 
 export {
   getTenantAccessToken,
-  sendFeishuMessage,
-  sendFeishuMessageStream,
   getFeishuMessage,
   getFeishuMessages,
+  sendFeishuMessage,
+  sendFeishuMessageStream,
 };

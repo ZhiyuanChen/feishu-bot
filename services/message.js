@@ -1,5 +1,4 @@
 import {
-  getTenantAccessToken,
   getFeishuMessages,
   sendFeishuMessage,
   sendFeishuMessageStream,
@@ -16,7 +15,7 @@ function buildGptPrompt(messages, botSenderID) {
     }));
 }
 
-async function handleMessage(env, tenantAccessToken, parsedDecrypted) {
+async function handleMessage(env, parsedDecrypted) {
   const chatId = parsedDecrypted.event.message.chat_id;
   const messageId = parsedDecrypted.event.message.message_id;
   const eventId = parsedDecrypted.event.event_id;
@@ -41,13 +40,12 @@ async function handleMessage(env, tenantAccessToken, parsedDecrypted) {
       }
     }
 
-    const messages = await getFeishuMessages(env, tenantAccessToken, messageId);
+    const messages = await getFeishuMessages(env, messageId);
     const gptPrompt = buildGptPrompt([...messages], env.BotSenderID);
 
     const chatGptResponseStream = await getGptCompletionStream(env, gptPrompt);
     await sendFeishuMessageStream(
       env,
-      tenantAccessToken,
       chatId,
       "",
       chatGptResponseStream,
@@ -55,13 +53,12 @@ async function handleMessage(env, tenantAccessToken, parsedDecrypted) {
       messageId
     );
   } else if (!isGroupChat) {
-    const messages = await getFeishuMessages(env, tenantAccessToken, messageId);
+    const messages = await getFeishuMessages(env, messageId);
     const gptPrompt = buildGptPrompt([...messages], env.BotSenderID);
 
     const chatGptResponseStream = await getGptCompletionStream(env, gptPrompt);
     await sendFeishuMessageStream(
       env,
-      tenantAccessToken,
       chatId,
       "",
       chatGptResponseStream,

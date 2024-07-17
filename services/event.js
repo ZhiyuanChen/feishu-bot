@@ -1,12 +1,12 @@
-import { getTenantAccessToken, sendFeishuMessage } from "../api/feishu.js";
+import { sendFeishuMessage } from "../api/feishu.js";
 import { handleMessage } from "./message.js";
 
-async function handleDocumentCreation(env, tenantAccessToken, parsedDecrypted) {
+async function handleDocumentCreation(env, parsedDecrypted) {
   const chatId = env.ChatID;
   const documentTitle = parsedDecrypted.resource.title;
   const messageContent = `A new document titled "${documentTitle}" has been created.`;
 
-  await sendFeishuMessage(env, tenantAccessToken, chatId, messageContent);
+  await sendFeishuMessage(env, chatId, messageContent);
   return new Response("Document creation message sent successfully", {
     status: 200,
   });
@@ -22,25 +22,17 @@ async function handleUrlVerification(parsedDecrypted) {
 }
 
 async function handleEvent(env, ctx, parsedDecrypted) {
-  let tenantAccessToken;
-  try {
-    tenantAccessToken = await getTenantAccessToken(env.AppID, env.AppSecret);
-  } catch (error) {
-    console.error("Failed to get tenant_access_token", error);
-    return;
-  }
-
   const { action, event } = parsedDecrypted;
 
   if (action === "document.create") {
     console.log("Document creation event");
-    await handleDocumentCreation(env, tenantAccessToken, parsedDecrypted);
+    await handleDocumentCreation(env, parsedDecrypted);
     return;
   }
 
   if (event && event.message && event.message.message_type === "text") {
     console.log("Chat message event");
-    await handleMessage(env, tenantAccessToken, parsedDecrypted);
+    await handleMessage(env, parsedDecrypted);
     return;
   }
 
